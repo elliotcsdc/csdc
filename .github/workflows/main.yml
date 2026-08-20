@@ -34,29 +34,69 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $u -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u -ErrorAction SilentlyContinue
 
-      - name: Proxy Install
+      - name: Install noVNC
         shell: powershell
         run: |
-          $x = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
-          $y = "cld.exe"
-          Invoke-WebRequest -Uri $x -OutFile $y
+          # Baixa e instala o TightVNC (servidor VNC para Windows)
+          $vnc_url = "https://www.tightvnc.com/download/2.8.84/tightvnc-2.8.84-gpl-setup-64bit.msi"
+          Invoke-WebRequest -Uri $vnc_url -OutFile "tightvnc.msi"
+          Start-Process msiexec.exe -ArgumentList "/i `"tightvnc.msi`" /quiet /norestart" -Wait
+          
+          # Baixa noVNC (cliente web)
+          $novnc_url = "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip"
+          Invoke-WebRequest -Uri $novnc_url -OutFile "novnc.zip"
+          Expand-Archive "novnc.zip" -Force
+          Move-Item "noVNC-1.5.0" "novnc" -Force
+          Remove-Item "novnc.zip" -Force
 
-      - name: Proxy Start
+      - name: Configure VNC
         shell: powershell
         run: |
+          # Configura senha do VNC
+          $vnc_pass = "Temp123!"
+          
+          # Cria arquivo de configuração do VNC
+          @"
+          [HKEY_CURRENT_USER\Software\TightVNC\Server]
+          "Password"=hex:$( 
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($vnc_pass)
+              $hash = New-Object System.Security.Cryptography.MD5CryptoServiceProvider
+              $hash_bytes = $hash.ComputeHash($bytes)
+              -join ($hash_bytes | ForEach-Object { $_.ToString("X2") })
+          )
+          "UseVncAuthentication"=dword:00000001
+          "AllowLoopback"=dword:00000001
+          "@ | Out-File -FilePath "vnc_config.reg"
+          
+          reg import vnc_config.reg
+          
+          # Inicia servidor VNC
+          Start-Process "C:\Program Files\TightVNC\tvnserver.exe" -ArgumentList "-service"
+          Start-Sleep -Seconds 3
+
+      - name: Install Cloudflare Tunnel
+        shell: powershell
+        run: |
+          $url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          Invoke-WebRequest -Uri $url -OutFile "cld.exe"
+
+      - name: Start Cloudflare Tunnel
+        shell: powershell
+        run: |
+          # Inicia noVNC na porta 6080 (VNC web)
           $c = ".\cld.exe"
-          $a = "tunnel --url localhost:3389"
+          $a = "tunnel --url http://localhost:6080"
           Start-Process -FilePath $c -ArgumentList $a -NoNewWindow
           Start-Sleep -Seconds 10
+          
           Write-Host ""
           Write-Host "=========================================="
-          Write-Host "Service Active"
+          Write-Host "VNC Web Access Active!"
           Write-Host ""
-          Write-Host "Check logs for URL"
-          Write-Host "https://*.trycloudflare.com"
+          Write-Host "Access via browser:"
+          Write-Host "https://*.trycloudflare.com/vnc.html"
           Write-Host ""
-          Write-Host "User: user"
-          Write-Host "Pass: Temp123!"
+          Write-Host "VNC Password: Temp123!"
           Write-Host "=========================================="
 
       - name: Keep Alive
