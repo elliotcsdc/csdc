@@ -16,7 +16,7 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. Instalação
+      # 1. Dependências
       # ============================================================
       - name: Instalar dependências
         shell: bash
@@ -31,13 +31,12 @@ jobs:
             curl \
             ca-certificates \
             netcat-openbsd \
-            procps \
-            jq
+            procps
 
           echo "✅ Dependências instaladas"
 
       # ============================================================
-      # 2. Instalar Rust + Bore
+      # 2. Instalar Bore
       # ============================================================
       - name: Instalar Bore
         shell: bash
@@ -57,23 +56,11 @@ jobs:
             source "$HOME/.cargo/env"
           fi
 
-          echo "Rust:"
-          rustc --version
-
-          echo "Cargo:"
-          cargo --version
-
-          if ! command -v bore >/dev/null 2>&1; then
-            echo "📦 Instalando bore-cli..."
-
-            cargo install bore-cli
-          fi
-
           export PATH="$HOME/.cargo/bin:$PATH"
 
           if ! command -v bore >/dev/null 2>&1; then
-            echo "❌ Bore não foi instalado."
-            exit 1
+            echo "📦 Instalando bore-cli..."
+            cargo install bore-cli
           fi
 
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
@@ -82,7 +69,7 @@ jobs:
           bore --version
 
       # ============================================================
-      # 3. Criar usuário
+      # 3. Criar usuário SSH
       # ============================================================
       - name: Criar usuário SSH
         shell: bash
@@ -107,9 +94,9 @@ jobs:
           echo "✅ Usuário criado: $SSH_USER"
 
       # ============================================================
-      # 4. Criar chave SSH
+      # 4. Gerar chave SSH
       # ============================================================
-      - name: Gerar chave ED25519
+      - name: Gerar chave SSH
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -141,10 +128,10 @@ jobs:
 
           echo "SSH_KEY=$KEY_DIR/id_ed25519" >> "$GITHUB_ENV"
 
-          echo "✅ Chave SSH configurada"
+          echo "✅ Chave SSH criada"
 
       # ============================================================
-      # 5. Configurar sshd
+      # 5. Configurar SSH
       # ============================================================
       - name: Configurar SSH
         shell: bash
@@ -178,26 +165,17 @@ jobs:
           LogLevel INFO
           EOF
 
-          echo "🔍 Validando sshd..."
-
           sudo sshd -t
-
-          echo "🧹 Parando instâncias antigas..."
 
           sudo systemctl stop ssh 2>/dev/null || true
           sudo systemctl stop sshd 2>/dev/null || true
-
           sudo pkill -x sshd 2>/dev/null || true
 
           sleep 1
 
-          echo "🚀 Iniciando sshd..."
-
           sudo /usr/sbin/sshd
 
-          echo "✅ sshd iniciado"
-
-          sudo ss -lntp | grep ":$SSH_PORT" || true
+          echo "✅ SSH iniciado"
 
       # ============================================================
       # 6. Esperar SSH
@@ -207,21 +185,18 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          echo "⏳ Aguardando localhost:$SSH_PORT..."
-
           for i in {1..30}; do
             if nc -z 127.0.0.1 "$SSH_PORT"; then
-              echo "✅ SSH está escutando"
+              echo "✅ SSH está escutando em 127.0.0.1:$SSH_PORT"
               exit 0
             fi
 
             sleep 1
           done
 
-          echo "❌ SSH não abriu a porta."
+          echo "❌ SSH não iniciou."
 
           sudo ss -lntp || true
-          sudo journalctl -u ssh --no-pager -n 100 2>/dev/null || true
 
           exit 1
 
@@ -241,7 +216,12 @@ jobs:
             -o UserKnownHostsFile=/dev/null \
             -o ConnectTimeout=10 \
             "$SSH_USER@127.0.0.1" \
-            'echo SSH_LOCAL_OK; whoami; hostname; uname -a'
+            '
+              echo "SSH_LOCAL_OK"
+              echo "Usuário: $(whoami)"
+              echo "Host: $(hostname)"
+              uname -a
+            '
 
           echo "✅ SSH local funcionando"
 
@@ -259,8 +239,6 @@ jobs:
           touch "$LOG"
 
           echo "🚀 Iniciando Bore..."
-          echo "Local: 127.0.0.1:$SSH_PORT"
-          echo "Remote: $BORE_HOST"
 
           bore local "$SSH_PORT" \
             --local-host 127.0.0.1 \
@@ -275,34 +253,24 @@ jobs:
           PUBLIC_PORT=""
 
           # ========================================================
-          # Esperar o endereço público real
+          # Esperar Bore anunciar a porta
           # ========================================================
           for i in {1..45}; do
 
-            echo "⏳ Bore: tentativa $i/45"
+            echo "⏳ Aguardando Bore... $i/45"
 
-            # Processo morreu?
             if ! kill -0 "$BORE_PID" 2>/dev/null; then
               echo "❌ Bore encerrou."
 
-              echo
-              echo "========== BORE LOG =========="
               cat "$LOG" || true
-              echo "==============================="
 
               exit 1
             fi
 
-            # Formato documentado:
-            #
-            # bore.pub:12345
-            #
             PUBLIC_PORT=$(
-              grep -oE \
-                'bore\.pub:[0-9]+' \
-                "$LOG" \
-                | head -n 1 \
-                | cut -d ':' -f 2 \
+              grep -oE 'bore\.pub:[0-9]+' "$LOG" \
+                | head -n1 \
+                | cut -d ':' -f2 \
                 || true
             )
 
@@ -319,72 +287,47 @@ jobs:
           echo "==============================="
 
           if ! [[ "$PUBLIC_PORT" =~ ^[0-9]+$ ]]; then
-            echo
-            echo "❌ Bore iniciou, mas não anunciou uma porta válida."
-            echo
-            echo "Verifique o log acima."
+            echo "❌ Não foi possível obter a porta pública."
             exit 1
           fi
 
           echo "PUBLIC_PORT=$PUBLIC_PORT" >> "$GITHUB_ENV"
 
-          echo
-          echo "=========================================="
-          echo "           BORE ONLINE"
-          echo "=========================================="
-          echo "Host : $BORE_HOST"
-          echo "Port : $PUBLIC_PORT"
-          echo "=========================================="
+          echo "✅ Bore disponível:"
+          echo "bore.pub:$PUBLIC_PORT"
 
       # ============================================================
       # 9. Testar porta pública
       # ============================================================
-      - name: Testar conectividade Bore
+      - name: Testar túnel
         shell: bash
         run: |
           set -Eeuo pipefail
 
           echo "🔎 Testando $BORE_HOST:$PUBLIC_PORT"
 
-          CONNECTED="false"
-
           for i in {1..30}; do
-
-            if nc \
-              -z \
-              -w 5 \
-              "$BORE_HOST" \
-              "$PUBLIC_PORT"; then
-
-              CONNECTED="true"
+            if nc -z -w 5 "$BORE_HOST" "$PUBLIC_PORT"; then
               echo "✅ Porta pública acessível"
-              break
+              exit 0
             fi
 
-            echo "⏳ Ainda não acessível ($i/30)"
             sleep 2
           done
 
-          if [ "$CONNECTED" != "true" ]; then
-            echo "❌ Porta Bore não está acessível."
+          echo "❌ Porta pública não respondeu."
 
-            echo
-            echo "========== BORE LOG =========="
-            cat "$BORE_LOG" || true
-            echo "==============================="
+          cat "$BORE_LOG" || true
 
-            exit 1
-          fi
+          exit 1
 
       # ============================================================
-      # 10. SSH através do Bore
+      # 10. Testar SSH através do Bore
       # ============================================================
-      - name: Testar SSH pelo Bore
+      - name: Testar SSH via Bore
         shell: bash
         run: |
           set -Eeuo pipefail
-
-          echo "🔐 Testando SSH via Bore..."
 
           ssh \
             -i "$SSH_KEY" \
@@ -406,40 +349,56 @@ jobs:
               echo "================================"
             '
 
-          echo "✅ SSH remoto funcionando"
+          echo "✅ SSH via Bore funcionando"
 
       # ============================================================
-      # 11. Gerar configuração de conexão
+      # 11. MOSTRAR CHAVE E DADOS DE CONEXÃO
       # ============================================================
-      - name: Mostrar conexão
+      - name: Mostrar dados para conexão
         shell: bash
         run: |
           set -Eeuo pipefail
 
           echo
-          echo "======================================================"
-          echo "                 SSH VIA BORE"
-          echo "======================================================"
+          echo "################################################################"
+          echo "#                                                              #"
+          echo "#              SSH VIA BORE DISPONÍVEL                        #"
+          echo "#                                                              #"
+          echo "################################################################"
           echo
+
           echo "Host:"
-          echo "  $BORE_HOST"
+          echo "$BORE_HOST"
+
           echo
           echo "Porta:"
-          echo "  $PUBLIC_PORT"
+          echo "$PUBLIC_PORT"
+
           echo
           echo "Usuário:"
-          echo "  $SSH_USER"
+          echo "$SSH_USER"
+
           echo
-          echo "Comando:"
+          echo "Chave privada em Base64:"
           echo
-          echo "  ssh -i ~/.ssh/bore_key \\"
-          echo "      -p $PUBLIC_PORT \\"
-          echo "      $SSH_USER@$BORE_HOST"
+          base64 -w 0 "$SSH_KEY"
           echo
-          echo "======================================================"
+          echo
+
+          echo "################################################################"
+          echo "# COPIE SOMENTE A LINHA DA CHAVE BASE64 ACIMA                 #"
+          echo "################################################################"
+
+          echo
+          echo "Comando depois de criar ~/.ssh/bore_key:"
+          echo
+          echo "chmod 600 ~/.ssh/bore_key"
+          echo
+          echo "ssh -i ~/.ssh/bore_key -p $PUBLIC_PORT $SSH_USER@$BORE_HOST"
+          echo
 
       # ============================================================
-      # 12. Manter túnel
+      # 12. Manter Bore vivo
       # ============================================================
       - name: Manter Bore ativo
         shell: bash
@@ -447,7 +406,7 @@ jobs:
           set -Eeuo pipefail
 
           cleanup() {
-            echo "🧹 Limpando..."
+            echo "🧹 Encerrando..."
 
             if [ -n "${BORE_PID:-}" ]; then
               kill "$BORE_PID" 2>/dev/null || true
@@ -458,10 +417,18 @@ jobs:
 
           trap cleanup EXIT INT TERM
 
-          echo "🔄 Bore permanece ativo."
-          echo "PID : $BORE_PID"
-          echo "Host: $BORE_HOST"
-          echo "Port: $PUBLIC_PORT"
+          echo
+          echo "========================================"
+          echo "🔄 TÚNEL ATIVO"
+          echo "========================================"
+          echo "Host : $BORE_HOST"
+          echo "Port : $PUBLIC_PORT"
+          echo "User : $SSH_USER"
+          echo "========================================"
+          echo
+          echo "Não encerre este workflow enquanto"
+          echo quiser manter o SSH disponível.
+          echo
 
           while kill -0 "$BORE_PID" 2>/dev/null; do
             sleep 10
