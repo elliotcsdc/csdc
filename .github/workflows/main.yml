@@ -1,0 +1,71 @@
+name: windows-maintenance
+
+on:
+  workflow_dispatch:
+
+jobs:
+  system-check:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Performance Tuning
+        shell: powershell
+        run: |
+          $reg1 = "HKLM:\System\CurrentControlSet\Control\Terminal Server"
+          $reg2 = "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+          
+          Set-ItemProperty -Path $reg1 -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path $reg2 -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path $reg2 -Name "SecurityLayer" -Value 0 -Force
+          
+          netsh advfirewall firewall delete rule name="RDP-Tunnel" 2>$null
+          netsh advfirewall firewall add rule name="RDP-Tunnel" dir=in action=allow protocol=TCP localport=3389
+          
+          Get-NetFirewallRule -DisplayGroup "Remote Desktop" | Enable-NetFirewallRule
+          Restart-Service -Name TermService -Force
+
+      - name: Account Management
+        shell: powershell
+        run: |
+          $pwd = "Temp123!"
+          $sec = ConvertTo-SecureString $pwd -AsPlainText -Force
+          
+          $user = "user"
+          if (!(Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $user -Password $sec -AccountNeverExpires
+          }
+          
+          Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
+
+      - name: Install Bore Tunnel
+        shell: powershell
+        run: |
+          $url = "https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-v0.5.0-x86_64-pc-windows-msvc.zip"
+          Invoke-WebRequest -Uri $url -OutFile bore.zip
+          Expand-Archive bore.zip -Force
+          Move-Item .\bore\bore.exe .\ -Force
+
+      - name: Start Tunnel
+        shell: powershell
+        run: |
+          Start-Process -FilePath ".\bore.exe" -ArgumentList "local 3389 --to bore.pub" -NoNewWindow
+          Start-Sleep -Seconds 5
+          
+          Write-Host "=========================================="
+          Write-Host "RDP Tunnel Active!"
+          Write-Host ""
+          Write-Host "Connect using: bore.pub"
+          Write-Host "Port: Check logs above"
+          Write-Host "User: user"
+          Write-Host "Pass: Temp123!"
+          Write-Host "=========================================="
+
+      - name: Keep Alive
+        shell: powershell
+        run: |
+          while ($true) {
+              Write-Host "[$(Get-Date)] System running"
+              Start-Sleep -Seconds 300
+          }
