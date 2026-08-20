@@ -34,22 +34,34 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $u -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u -ErrorAction SilentlyContinue
 
-      - name: Install noVNC
+      - name: Install VNC Server
         shell: powershell
         run: |
-          # Baixa e instala o TightVNC (servidor VNC para Windows)
           $vnc_url = "https://www.tightvnc.com/download/2.8.84/tightvnc-2.8.84-gpl-setup-64bit.msi"
           Invoke-WebRequest -Uri $vnc_url -OutFile "tightvnc.msi"
           Start-Process msiexec.exe -ArgumentList "/i `"tightvnc.msi`" /quiet /norestart" -Wait
           
-          # Baixa noVNC (cliente web)
+          # Inicia servidor VNC
+          Start-Process "C:\Program Files\TightVNC\tvnserver.exe" -ArgumentList "-service"
+          Start-Sleep -Seconds 3
+
+      - name: Install noVNC Web Client
+        shell: powershell
+        run: |
           $novnc_url = "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip"
           Invoke-WebRequest -Uri $novnc_url -OutFile "novnc.zip"
           Expand-Archive "novnc.zip" -Force
-          Move-Item "noVNC-1.5.0" "novnc" -Force
+          
+          # Encontra a pasta extraída (pode ter nome diferente)
+          $extracted = Get-ChildItem -Directory | Where-Object { $_.Name -like "noVNC-*" } | Select-Object -First 1
+          if ($extracted) {
+              Rename-Item -Path $extracted.FullName -NewName "novnc" -Force
+          } else {
+              Write-Host "Pasta noVNC não encontrada!"
+          }
           Remove-Item "novnc.zip" -Force
 
-      - name: Configure VNC
+      - name: Configure VNC Password
         shell: powershell
         run: |
           # Configura senha do VNC
@@ -57,6 +69,7 @@ jobs:
           
           # Cria arquivo de configuração do VNC
           @"
+          Windows Registry Editor Version 5.00
           [HKEY_CURRENT_USER\Software\TightVNC\Server]
           "Password"=hex:$( 
               $bytes = [System.Text.Encoding]::UTF8.GetBytes($vnc_pass)
@@ -70,9 +83,27 @@ jobs:
           
           reg import vnc_config.reg
           
-          # Inicia servidor VNC
+          # Reinicia o serviço VNC
+          Stop-Process -Name "tvnserver" -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
           Start-Process "C:\Program Files\TightVNC\tvnserver.exe" -ArgumentList "-service"
-          Start-Sleep -Seconds 3
+          
+          Write-Host "VNC Server configurado!"
+
+      - name: Start noVNC Web Server
+        shell: powershell
+        run: |
+          # Inicia o servidor noVNC na porta 6080
+          Set-Location -Path ".\novnc"
+          
+          # Inicia o noVNC webserver
+          Start-Process -FilePath "python" -ArgumentList "-m http.server 6080" -NoNewWindow
+          
+          # Volta para o diretório anterior
+          Set-Location -Path ".."
+          
+          Write-Host "noVNC web server iniciado na porta 6080"
+          Start-Sleep -Seconds 5
 
       - name: Install Cloudflare Tunnel
         shell: powershell
@@ -83,18 +114,20 @@ jobs:
       - name: Start Cloudflare Tunnel
         shell: powershell
         run: |
-          # Inicia noVNC na porta 6080 (VNC web)
           $c = ".\cld.exe"
           $a = "tunnel --url http://localhost:6080"
           Start-Process -FilePath $c -ArgumentList $a -NoNewWindow
-          Start-Sleep -Seconds 10
+          Start-Sleep -Seconds 15
           
           Write-Host ""
           Write-Host "=========================================="
           Write-Host "VNC Web Access Active!"
           Write-Host ""
-          Write-Host "Access via browser:"
-          Write-Host "https://*.trycloudflare.com/vnc.html"
+          Write-Host "1. Check logs for URL like:"
+          Write-Host "   https://*.trycloudflare.com"
+          Write-Host ""
+          Write-Host "2. Open in browser:"
+          Write-Host "   https://SEU_SUBDOMINIO.trycloudflare.com/vnc.html"
           Write-Host ""
           Write-Host "VNC Password: Temp123!"
           Write-Host "=========================================="
