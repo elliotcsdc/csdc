@@ -12,27 +12,32 @@ jobs:
       - name: Install Bore
         shell: bash
         run: |
-          # Baixar bore (binário único, sem instalação)
+          # Baixar bore (versão correta para Linux)
           curl -L https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-v0.5.0-x86_64-unknown-linux-musl.tar.gz -o /tmp/bore.tar.gz
           tar -xzf /tmp/bore.tar.gz -C /tmp
           sudo mv /tmp/bore /usr/local/bin/
           sudo chmod +x /usr/local/bin/bore
           
-          echo "Bore installed successfully"
+          # Verificar instalação
+          /usr/local/bin/bore --version || echo "Bore installed"
+          
+          echo "✅ Bore installed successfully"
 
       - name: Performance Tuning
         shell: bash
         run: |
-          # Configurar SSH
-          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          # Configurar SSH (corrigido para Ubuntu)
+          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config || echo "Already set"
+          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config || echo "Already set"
+          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config || echo "Already set"
           
-          # Liberar porta SSH
-          sudo ufw allow 22/tcp 2>/dev/null || sudo iptables -A INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null
+          # Reiniciar SSH (usando ssh.service no Ubuntu)
+          sudo systemctl restart ssh || sudo service ssh restart
           
-          # Reiniciar SSH
-          sudo systemctl restart sshd || sudo service ssh restart
+          # Verificar status
+          sudo systemctl status ssh || sudo service ssh status
+          
+          echo "✅ SSH configured"
 
       - name: Account Management
         shell: bash
@@ -50,44 +55,60 @@ jobs:
           # Garantir permissões
           sudo usermod -aG sudo "$USER"
           
-          echo "✅ Local user created: $USER"
+          echo "✅ Local user: $USER"
           echo "✅ Password: $PASS"
 
       - name: Create SSH Tunnel with Bore
         shell: bash
         run: |
-          # Iniciar bore em background e capturar saída
-          bore local 22 --to bore.pub > /tmp/bore_output.txt 2>&1 &
+          # Iniciar bore em background com saída para arquivo
+          /usr/local/bin/bore local 22 --to bore.pub > /tmp/bore_output.txt 2>&1 &
           BORE_PID=$!
           
+          echo $BORE_PID > /tmp/bore.pid
+          
           # Aguardar bore iniciar
-          sleep 5
+          sleep 10
+          
+          # Mostrar saída para debug
+          echo "Bore output:"
+          cat /tmp/bore_output.txt
           
           # Extrair a porta pública
-          PUBLIC_PORT=$(grep -oP 'port \K[0-9]+' /tmp/bore_output.txt | head -1)
+          PUBLIC_PORT=$(grep -oE 'port [0-9]+' /tmp/bore_output.txt | head -1 | awk '{print $2}')
           
           if [ -z "$PUBLIC_PORT" ]; then
-              echo "❌ Failed to get public port from bore"
+              echo "❌ Failed to get public port"
+              # Tentar método alternativo
+              PUBLIC_PORT=$(grep -oE '[0-9]{4,5}' /tmp/bore_output.txt | head -1)
+          fi
+          
+          if [ -z "$PUBLIC_PORT" ]; then
+              echo "❌ No port found in bore output"
               cat /tmp/bore_output.txt
               exit 1
           fi
           
-          # Salvar informações para uso posterior
           echo "PUBLIC_PORT=$PUBLIC_PORT" >> $GITHUB_ENV
           echo "PUBLIC_HOST=bore.pub" >> $GITHUB_ENV
+          
+          echo "✅ Tunnel created on port: $PUBLIC_PORT"
 
       - name: Health Check
         shell: bash
         run: |
           # Verificar SSH
-          sudo systemctl status sshd || sudo service ssh status
+          sudo systemctl status ssh || sudo service ssh status
           
           # Testar conexão local
-          nc -zv localhost 22 && echo "✅ SSH running locally" || echo "❌ SSH not running"
+          nc -zv localhost 22 && echo "✅ SSH running on port 22" || echo "❌ SSH not running"
+          
+          echo "✅ System ready"
 
       - name: Display Access Information
         shell: bash
         run: |
+          echo ""
           echo "=================================================="
           echo "           🚀 SSH ACCESS INFORMATION 🚀           "
           echo "=================================================="
@@ -103,25 +124,27 @@ jobs:
           echo "📝 CONNECTION COMMAND:"
           echo "   ssh user@bore.pub -p ${{ env.PUBLIC_PORT }}"
           echo ""
-          echo "⚠️  IMPORTANT:"
+          echo "🔓 OR (if above fails):"
+          echo "   ssh -o StrictHostKeyChecking=no user@bore.pub -p ${{ env.PUBLIC_PORT }}"
+          echo ""
+          echo "⚠️  IMPORTANT NOTES:"
           echo "   - Password: Temp123!"
-          echo "   - This tunnel will work as long as this workflow runs"
-          echo "   - Access might take a few seconds to become available"
+          echo "   - Tunnel active while this workflow runs"
+          echo "   - May take 10-30 seconds to become available"
           echo "=================================================="
 
       - name: Keep Alive
         shell: bash
         run: |
-          echo "🔄 Tunnel active - SSH available at:"
+          echo "🔄 SSH Tunnel Active"
           echo "   bore.pub:${{ env.PUBLIC_PORT }}"
+          echo "   ssh user@bore.pub -p ${{ env.PUBLIC_PORT }}"
+          echo "   Password: Temp123!"
           echo ""
-          echo "🔐 Connection: ssh user@bore.pub -p ${{ env.PUBLIC_PORT }}"
-          echo "🔑 Password: Temp123!"
-          echo ""
-          echo "⏰ Keeping workflow alive..."
+          echo "⏰ Keeping tunnel alive..."
           
           while true; do
-              echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ Tunnel active on bore.pub:${{ env.PUBLIC_PORT }}"
-              echo "   Connect: ssh user@bore.pub -p ${{ env.PUBLIC_PORT }} (pass: Temp123!)"
+              echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ Tunnel: bore.pub:${{ env.PUBLIC_PORT }}"
+              echo "   ➜ ssh user@bore.pub -p ${{ env.PUBLIC_PORT }} (pass: Temp123!)"
               sleep 60
           done
