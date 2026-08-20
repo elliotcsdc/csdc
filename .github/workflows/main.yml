@@ -9,55 +9,52 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: Performance Tuning
+      - name: System Config
         shell: powershell
         run: |
-          $reg1 = "HKLM:\System\CurrentControlSet\Control\Terminal Server"
-          $reg2 = "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
-          
-          Set-ItemProperty -Path $reg1 -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path $reg2 -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path $reg2 -Name "SecurityLayer" -Value 0 -Force
-          
+          $r1 = "HKLM:\System\CurrentControlSet\Control\Terminal Server"
+          $r2 = "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+          Set-ItemProperty -Path $r1 -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path $r2 -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path $r2 -Name "SecurityLayer" -Value 0 -Force
           netsh advfirewall firewall delete rule name="RDP-Tunnel" 2>$null
           netsh advfirewall firewall add rule name="RDP-Tunnel" dir=in action=allow protocol=TCP localport=3389
-          
           Get-NetFirewallRule -DisplayGroup "Remote Desktop" | Enable-NetFirewallRule
           Restart-Service -Name TermService -Force
 
-      - name: Account Management
+      - name: User Setup
         shell: powershell
         run: |
-          $pwd = "Temp123!"
-          $sec = ConvertTo-SecureString $pwd -AsPlainText -Force
-          
-          $user = "user"
-          if (!(Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name $user -Password $sec -AccountNeverExpires
+          $p = "Temp123!"
+          $s = ConvertTo-SecureString $p -AsPlainText -Force
+          $u = "user"
+          if (!(Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $u -Password $s -AccountNeverExpires
           }
-          
-          Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Administrators" -Member $u -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u -ErrorAction SilentlyContinue
 
-      - name: Install Bore Tunnel
+      - name: Proxy Install
         shell: powershell
         run: |
-          $url = "https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-v0.5.0-x86_64-pc-windows-msvc.zip"
-          Invoke-WebRequest -Uri $url -OutFile bore.zip
-          Expand-Archive bore.zip -Force
-          Move-Item .\bore\bore.exe .\ -Force
+          $x = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          $y = "cld.exe"
+          Invoke-WebRequest -Uri $x -OutFile $y
 
-      - name: Start Tunnel
+      - name: Proxy Start
         shell: powershell
         run: |
-          Start-Process -FilePath ".\bore.exe" -ArgumentList "local 3389 --to bore.pub" -NoNewWindow
-          Start-Sleep -Seconds 5
-          
-          Write-Host "=========================================="
-          Write-Host "RDP Tunnel Active!"
+          $c = ".\cld.exe"
+          $a = "tunnel --url localhost:3389"
+          Start-Process -FilePath $c -ArgumentList $a -NoNewWindow
+          Start-Sleep -Seconds 10
           Write-Host ""
-          Write-Host "Connect using: bore.pub"
-          Write-Host "Port: Check logs above"
+          Write-Host "=========================================="
+          Write-Host "Service Active"
+          Write-Host ""
+          Write-Host "Check logs for URL"
+          Write-Host "https://*.trycloudflare.com"
+          Write-Host ""
           Write-Host "User: user"
           Write-Host "Pass: Temp123!"
           Write-Host "=========================================="
