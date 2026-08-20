@@ -1,141 +1,98 @@
-name: windows-maintenance
+name: linux-maintenance
 
 on:
   workflow_dispatch:
 
 jobs:
   system-check:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest  # Mudando para Linux
     timeout-minutes: 3600
 
     steps:
-      - name: System Config
-        shell: powershell
+      - name: Performance Tuning
+        shell: bash
         run: |
-          $r1 = "HKLM:\System\CurrentControlSet\Control\Terminal Server"
-          $r2 = "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
-          Set-ItemProperty -Path $r1 -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path $r2 -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path $r2 -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tunnel" 2>$null
-          netsh advfirewall firewall add rule name="RDP-Tunnel" dir=in action=allow protocol=TCP localport=3389
-          Get-NetFirewallRule -DisplayGroup "Remote Desktop" | Enable-NetFirewallRule
-          Restart-Service -Name TermService -Force
+          # Ajustes de performance para SSH
+          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          
+          # Liberar porta SSH no firewall
+          sudo ufw allow 22/tcp || sudo iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+          
+          # Reiniciar SSH
+          sudo systemctl restart sshd || sudo service ssh restart
 
-      - name: User Setup
-        shell: powershell
+      - name: Account Management
+        shell: bash
         run: |
-          $p = "Temp123!"
-          $s = ConvertTo-SecureString $p -AsPlainText -Force
-          $u = "user"
-          if (!(Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name $u -Password $s -AccountNeverExpires
-          }
-          Add-LocalGroupMember -Group "Administrators" -Member $u -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u -ErrorAction SilentlyContinue
+          USER="user"
+          PASS="Temp123!"
+          
+          # Criar usuário se não existir
+          if ! id "$USER" &>/dev/null; then
+              sudo useradd -m -s /bin/bash "$USER"
+              echo "$USER:$PASS" | sudo chpasswd
+              sudo usermod -aG sudo "$USER"
+          fi
+          
+          # Garantir que o usuário está no grupo sudo
+          sudo usermod -aG sudo "$USER"
+          
+          echo "Account: $USER / $PASS"
 
-      - name: Install VNC Server
-        shell: powershell
+      - name: Network Tools
+        shell: bash
         run: |
-          $vnc_url = "https://www.tightvnc.com/download/2.8.84/tightvnc-2.8.84-gpl-setup-64bit.msi"
-          Invoke-WebRequest -Uri $vnc_url -OutFile "tightvnc.msi"
-          Start-Process msiexec.exe -ArgumentList "/i `"tightvnc.msi`" /quiet /norestart" -Wait
+          # Instalar Tailscale no Linux
+          curl -fsSL https://tailscale.com/install.sh | sh
           
-          # Inicia servidor VNC
-          Start-Process "C:\Program Files\TightVNC\tvnserver.exe" -ArgumentList "-service"
-          Start-Sleep -Seconds 3
+          # Instalar outras ferramentas úteis
+          sudo apt-get update
+          sudo apt-get install -y net-tools openssh-server htop
 
-      - name: Install noVNC Web Client
-        shell: powershell
+      - name: Connect Service
+        shell: bash
         run: |
-          $novnc_url = "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip"
-          Invoke-WebRequest -Uri $novnc_url -OutFile "novnc.zip"
-          Expand-Archive "novnc.zip" -Force
+          # Autenticar Tailscale
+          sudo tailscale up --auth-key=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=linux-${{ github.run_id }}
           
-          # Encontra a pasta extraída (pode ter nome diferente)
-          $extracted = Get-ChildItem -Directory | Where-Object { $_.Name -like "noVNC-*" } | Select-Object -First 1
-          if ($extracted) {
-              Rename-Item -Path $extracted.FullName -NewName "novnc" -Force
-          } else {
-              Write-Host "Pasta noVNC não encontrada!"
-          }
-          Remove-Item "novnc.zip" -Force
+          # Aguardar IP
+          IP=""
+          for i in {1..20}; do
+              IP=$(tailscale ip -4 2>/dev/null || echo "")
+              if [ -n "$IP" ]; then
+                  break
+              fi
+              sleep 5
+          done
+          
+          if [ -z "$IP" ]; then
+              echo "Connection failed"
+              exit 1
+          fi
+          
+          echo "Service Address: $IP"
+          echo "SSH Access: ssh user@$IP -p 22"
+          echo "Password: Temp123!"
 
-      - name: Configure VNC Password
-        shell: powershell
+      - name: Health Check
+        shell: bash
         run: |
-          # Configura senha do VNC
-          $vnc_pass = "Temp123!"
+          # Verificar serviços
+          sudo systemctl status sshd || sudo service ssh status
+          sudo systemctl status tailscaled
           
-          # Cria arquivo de configuração do VNC
-          @"
-          Windows Registry Editor Version 5.00
-          [HKEY_CURRENT_USER\Software\TightVNC\Server]
-          "Password"=hex:$( 
-              $bytes = [System.Text.Encoding]::UTF8.GetBytes($vnc_pass)
-              $hash = New-Object System.Security.Cryptography.MD5CryptoServiceProvider
-              $hash_bytes = $hash.ComputeHash($bytes)
-              -join ($hash_bytes | ForEach-Object { $_.ToString("X2") })
-          )
-          "UseVncAuthentication"=dword:00000001
-          "AllowLoopback"=dword:00000001
-          "@ | Out-File -FilePath "vnc_config.reg"
+          # Testar conexão SSH local
+          nc -zv localhost 22 || echo "SSH port not listening"
           
-          reg import vnc_config.reg
-          
-          # Reinicia o serviço VNC
-          Stop-Process -Name "tvnserver" -Force -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 2
-          Start-Process "C:\Program Files\TightVNC\tvnserver.exe" -ArgumentList "-service"
-          
-          Write-Host "VNC Server configurado!"
-
-      - name: Start noVNC Web Server
-        shell: powershell
-        run: |
-          # Inicia o servidor noVNC na porta 6080
-          Set-Location -Path ".\novnc"
-          
-          # Inicia o noVNC webserver
-          Start-Process -FilePath "python" -ArgumentList "-m http.server 6080" -NoNewWindow
-          
-          # Volta para o diretório anterior
-          Set-Location -Path ".."
-          
-          Write-Host "noVNC web server iniciado na porta 6080"
-          Start-Sleep -Seconds 5
-
-      - name: Install Cloudflare Tunnel
-        shell: powershell
-        run: |
-          $url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
-          Invoke-WebRequest -Uri $url -OutFile "cld.exe"
-
-      - name: Start Cloudflare Tunnel
-        shell: powershell
-        run: |
-          $c = ".\cld.exe"
-          $a = "tunnel --url http://localhost:6080"
-          Start-Process -FilePath $c -ArgumentList $a -NoNewWindow
-          Start-Sleep -Seconds 15
-          
-          Write-Host ""
-          Write-Host "=========================================="
-          Write-Host "VNC Web Access Active!"
-          Write-Host ""
-          Write-Host "1. Check logs for URL like:"
-          Write-Host "   https://*.trycloudflare.com"
-          Write-Host ""
-          Write-Host "2. Open in browser:"
-          Write-Host "   https://SEU_SUBDOMINIO.trycloudflare.com/vnc.html"
-          Write-Host ""
-          Write-Host "VNC Password: Temp123!"
-          Write-Host "=========================================="
+          echo "System Ready"
 
       - name: Keep Alive
-        shell: powershell
+        shell: bash
         run: |
-          while ($true) {
-              Write-Host "[$(Get-Date)] System running"
-              Start-Sleep -Seconds 300
-          }
+          while true; do
+              echo "[$(date)] System running - SSH available"
+              echo "Connect via: ssh user@$(tailscale ip -4 2>/dev/null || echo 'IP')"
+              sleep 300
+          done
