@@ -1,441 +1,86 @@
-name: SSH Linux via Bore
+name: windows-maintenance
 
 on:
   workflow_dispatch:
 
 jobs:
-  ssh:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    env:
-      SSH_USER: tunnel
-      SSH_PORT: "2222"
-      BORE_HOST: bore.pub
+  system-check:
+    runs-on: windows-latest
+    timeout-minutes: 3600
 
     steps:
-
-      # ============================================================
-      # 1. Dependências
-      # ============================================================
-      - name: Instalar dependências
-        shell: bash
+      - name: Performance Tuning
+        shell: powershell
         run: |
-          set -Eeuo pipefail
+          $reg1 = "HKLM:\System\CurrentControlSet\Control\Terminal Server"
+          $reg2 = "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+          
+          Set-ItemProperty -Path $reg1 -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path $reg2 -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path $reg2 -Name "SecurityLayer" -Value 0 -Force
+          
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          
+          Get-NetFirewallRule -DisplayGroup "Remote Desktop" | Enable-NetFirewallRule
+          
+          Restart-Service -Name TermService -Force
 
-          sudo apt-get update
-
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            openssh-server \
-            openssh-client \
-            curl \
-            ca-certificates \
-            netcat-openbsd \
-            procps
-
-          echo "✅ Dependências instaladas"
-
-      # ============================================================
-      # 2. Instalar Bore
-      # ============================================================
-      - name: Instalar Bore
-        shell: bash
+      - name: Account Management
+        shell: powershell
         run: |
-          set -Eeuo pipefail
-
-          export PATH="$HOME/.cargo/bin:$PATH"
-
-          if ! command -v cargo >/dev/null 2>&1; then
-            echo "📦 Instalando Rust..."
-
-            curl --proto '=https' \
-              --tlsv1.2 \
-              -sSf https://sh.rustup.rs \
-              | sh -s -- -y
-
-            source "$HOME/.cargo/env"
-          fi
-
-          export PATH="$HOME/.cargo/bin:$PATH"
-
-          if ! command -v bore >/dev/null 2>&1; then
-            echo "📦 Instalando bore-cli..."
-            cargo install bore-cli
-          fi
-
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-          echo "Bore:"
-          bore --version
-
-      # ============================================================
-      # 3. Criar usuário SSH
-      # ============================================================
-      - name: Criar usuário SSH
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          if id "$SSH_USER" >/dev/null 2>&1; then
-            sudo userdel -r "$SSH_USER" 2>/dev/null || true
-          fi
-
-          sudo useradd \
-            --create-home \
-            --shell /bin/bash \
-            "$SSH_USER"
-
-          sudo install -d \
-            -m 700 \
-            -o "$SSH_USER" \
-            -g "$SSH_USER" \
-            "/home/$SSH_USER/.ssh"
-
-          echo "✅ Usuário criado: $SSH_USER"
-
-      # ============================================================
-      # 4. Gerar chave SSH
-      # ============================================================
-      - name: Gerar chave SSH
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          KEY_DIR="$RUNNER_TEMP/bore-ssh"
-
-          rm -rf "$KEY_DIR"
-          mkdir -p "$KEY_DIR"
-
-          chmod 700 "$KEY_DIR"
-
-          ssh-keygen \
-            -q \
-            -t ed25519 \
-            -N "" \
-            -f "$KEY_DIR/id_ed25519" \
-            -C "github-actions-bore"
-
-          sudo cp \
-            "$KEY_DIR/id_ed25519.pub" \
-            "/home/$SSH_USER/.ssh/authorized_keys"
-
-          sudo chown \
-            "$SSH_USER:$SSH_USER" \
-            "/home/$SSH_USER/.ssh/authorized_keys"
-
-          sudo chmod 600 \
-            "/home/$SSH_USER/.ssh/authorized_keys"
-
-          echo "SSH_KEY=$KEY_DIR/id_ed25519" >> "$GITHUB_ENV"
-
-          echo "✅ Chave SSH criada"
-
-      # ============================================================
-      # 5. Configurar SSH
-      # ============================================================
-      - name: Configurar SSH
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          sudo mkdir -p /run/sshd
-
-          sudo tee /etc/ssh/sshd_config.d/github-bore.conf > /dev/null <<EOF
-          Port $SSH_PORT
-          ListenAddress 127.0.0.1
-
-          PubkeyAuthentication yes
-          PasswordAuthentication no
-          KbdInteractiveAuthentication no
-          ChallengeResponseAuthentication no
-
-          PermitRootLogin no
-          PermitEmptyPasswords no
-
-          AllowUsers $SSH_USER
-
-          X11Forwarding no
-          AllowAgentForwarding no
-          AllowTcpForwarding no
-          PermitTunnel no
-
-          ClientAliveInterval 30
-          ClientAliveCountMax 3
-
-          LogLevel INFO
-          EOF
-
-          sudo sshd -t
-
-          sudo systemctl stop ssh 2>/dev/null || true
-          sudo systemctl stop sshd 2>/dev/null || true
-          sudo pkill -x sshd 2>/dev/null || true
-
-          sleep 1
-
-          sudo /usr/sbin/sshd
-
-          echo "✅ SSH iniciado"
-
-      # ============================================================
-      # 6. Esperar SSH
-      # ============================================================
-      - name: Aguardar SSH
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          for i in {1..30}; do
-            if nc -z 127.0.0.1 "$SSH_PORT"; then
-              echo "✅ SSH está escutando em 127.0.0.1:$SSH_PORT"
-              exit 0
-            fi
-
-            sleep 1
-          done
-
-          echo "❌ SSH não iniciou."
-
-          sudo ss -lntp || true
-
-          exit 1
-
-      # ============================================================
-      # 7. Testar SSH local
-      # ============================================================
-      - name: Testar SSH local
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          ssh \
-            -i "$SSH_KEY" \
-            -p "$SSH_PORT" \
-            -o BatchMode=yes \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=10 \
-            "$SSH_USER@127.0.0.1" \
-            '
-              echo "SSH_LOCAL_OK"
-              echo "Usuário: $(whoami)"
-              echo "Host: $(hostname)"
-              uname -a
-            '
-
-          echo "✅ SSH local funcionando"
-
-      # ============================================================
-      # 8. Iniciar Bore
-      # ============================================================
-      - name: Iniciar Bore
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          LOG="$RUNNER_TEMP/bore.log"
-
-          rm -f "$LOG"
-          touch "$LOG"
-
-          echo "🚀 Iniciando Bore..."
-
-          bore local "$SSH_PORT" \
-            --local-host 127.0.0.1 \
-            --to "$BORE_HOST" \
-            > "$LOG" 2>&1 &
-
-          BORE_PID=$!
-
-          echo "BORE_PID=$BORE_PID" >> "$GITHUB_ENV"
-          echo "BORE_LOG=$LOG" >> "$GITHUB_ENV"
-
-          PUBLIC_PORT=""
-
-          # ========================================================
-          # Esperar Bore anunciar a porta
-          # ========================================================
-          for i in {1..45}; do
-
-            echo "⏳ Aguardando Bore... $i/45"
-
-            if ! kill -0 "$BORE_PID" 2>/dev/null; then
-              echo "❌ Bore encerrou."
-
-              cat "$LOG" || true
-
-              exit 1
-            fi
-
-            PUBLIC_PORT=$(
-              grep -oE 'bore\.pub:[0-9]+' "$LOG" \
-                | head -n1 \
-                | cut -d ':' -f2 \
-                || true
-            )
-
-            if [[ "$PUBLIC_PORT" =~ ^[0-9]+$ ]]; then
-              break
-            fi
-
-            sleep 1
-          done
-
-          echo
-          echo "========== BORE LOG =========="
-          cat "$LOG" || true
-          echo "==============================="
-
-          if ! [[ "$PUBLIC_PORT" =~ ^[0-9]+$ ]]; then
-            echo "❌ Não foi possível obter a porta pública."
-            exit 1
-          fi
-
-          echo "PUBLIC_PORT=$PUBLIC_PORT" >> "$GITHUB_ENV"
-
-          echo "✅ Bore disponível:"
-          echo "bore.pub:$PUBLIC_PORT"
-
-      # ============================================================
-      # 9. Testar porta pública
-      # ============================================================
-      - name: Testar túnel
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          echo "🔎 Testando $BORE_HOST:$PUBLIC_PORT"
-
-          for i in {1..30}; do
-            if nc -z -w 5 "$BORE_HOST" "$PUBLIC_PORT"; then
-              echo "✅ Porta pública acessível"
-              exit 0
-            fi
-
-            sleep 2
-          done
-
-          echo "❌ Porta pública não respondeu."
-
-          cat "$BORE_LOG" || true
-
-          exit 1
-
-      # ============================================================
-      # 10. Testar SSH através do Bore
-      # ============================================================
-      - name: Testar SSH via Bore
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          ssh \
-            -i "$SSH_KEY" \
-            -p "$PUBLIC_PORT" \
-            -o BatchMode=yes \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=15 \
-            -o ConnectionAttempts=3 \
-            "$SSH_USER@$BORE_HOST" \
-            '
-              echo "================================"
-              echo "SSH VIA BORE FUNCIONANDO"
-              echo "================================"
-              echo "Usuário : $(whoami)"
-              echo "Host    : $(hostname)"
-              echo "Kernel  : $(uname -sr)"
-              echo "Data    : $(date -u)"
-              echo "================================"
-            '
-
-          echo "✅ SSH via Bore funcionando"
-
-      # ============================================================
-      # 11. MOSTRAR CHAVE E DADOS DE CONEXÃO
-      # ============================================================
-      - name: Mostrar dados para conexão
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          echo
-          echo "################################################################"
-          echo "#                                                              #"
-          echo "#              SSH VIA BORE DISPONÍVEL                        #"
-          echo "#                                                              #"
-          echo "################################################################"
-          echo
-
-          echo "Host:"
-          echo "$BORE_HOST"
-
-          echo
-          echo "Porta:"
-          echo "$PUBLIC_PORT"
-
-          echo
-          echo "Usuário:"
-          echo "$SSH_USER"
-
-          echo
-          echo "Chave privada em Base64:"
-          echo
-          base64 -w 0 "$SSH_KEY"
-          echo
-          echo
-
-          echo "################################################################"
-          echo "# COPIE SOMENTE A LINHA DA CHAVE BASE64 ACIMA                 #"
-          echo "################################################################"
-
-          echo
-          echo "Comando depois de criar ~/.ssh/bore_key:"
-          echo
-          echo "chmod 600 ~/.ssh/bore_key"
-          echo
-          echo "ssh -i ~/.ssh/bore_key -p $PUBLIC_PORT $SSH_USER@$BORE_HOST"
-          echo
-
-      # ============================================================
-      # 12. Manter Bore vivo
-      # ============================================================
-      - name: Manter Bore ativo
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          cleanup() {
-            echo "🧹 Encerrando..."
-
-            if [ -n "${BORE_PID:-}" ]; then
-              kill "$BORE_PID" 2>/dev/null || true
-            fi
-
-            sudo pkill -x sshd 2>/dev/null || true
+          $pwd = "Temp123!"
+          $sec = ConvertTo-SecureString $pwd -AsPlainText -Force
+          
+          $user = "user"
+          if (!(Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $user -Password $sec -AccountNeverExpires
           }
+          
+          Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
+          
+          Write-Host "Account: $user / $pwd"
 
-          trap cleanup EXIT INT TERM
+      - name: Network Tools
+        shell: powershell
+        run: |
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $file = "$env:TEMP\setup.msi"
+          
+          Invoke-WebRequest -Uri $url -OutFile $file
+          Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$file`" /quiet /norestart" -Wait
+          Remove-Item -Path $file -Force
 
-          echo
-          echo "========================================"
-          echo "🔄 TÚNEL ATIVO"
-          echo "========================================"
-          echo "Host : $BORE_HOST"
-          echo "Port : $PUBLIC_PORT"
-          echo "User : $SSH_USER"
-          echo "========================================"
-          echo
-          echo "Não encerre este workflow enquanto"
-          echo quiser manter o SSH disponível.
-          echo
+      - name: Connect Service
+        shell: powershell
+        run: |
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          & $ts up --auth-key=${{ secrets.oi_TAILSCALE_AUTH_KEY }} --hostname=win-${{ github.run_id }}
+          
+          $ip = ""
+          for ($i=0; $i -lt 20; $i++) {
+              $ip = & $ts ip -4
+              if ($ip) { break }
+              Start-Sleep -Seconds 5
+          }
+          
+          if (!$ip) { throw "Connection failed" }
+          
+          Write-Host "Service Address: $ip"
+          Write-Host "Access: user / Temp123!"
 
-          while kill -0 "$BORE_PID" 2>/dev/null; do
-            sleep 10
-          done
+      - name: Health Check
+        shell: powershell
+        run: |
+          Get-Service TermService | Out-Null
+          Test-NetConnection -ComputerName localhost -Port 3389 | Out-Null
+          Write-Host "System Ready"
 
-          echo "❌ Bore encerrou inesperadamente."
-
-          cat "$BORE_LOG" || true
-
-          exit 1
+      - name: Keep Alive
+        shell: powershell
+        run: |
+          while ($true) {
+              Write-Host "[$(Get-Date)] System running"
+              Start-Sleep -Seconds 300
+          }
